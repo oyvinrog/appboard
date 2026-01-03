@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -27,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import determine_launch, load_tiles_file, save_tiles_file
+from core import determine_launch, list_desktop_apps, load_tiles_file, save_tiles_file
 
 APP_NAME = "AppBoard"
 DATA_FILE = Path(__file__).with_name("shortcuts.json")
@@ -108,7 +110,7 @@ class FlowLayout(QLayout):
 
 
 class AddTileDialog(QDialog):
-    def __init__(self, parent=None, defaults=None):
+    def __init__(self, parent=None, defaults=None, path_readonly=False, allow_browse=True):
         super().__init__(parent)
         self.setWindowTitle("Add Tile")
         self.setModal(True)
@@ -123,10 +125,10 @@ class AddTileDialog(QDialog):
         path_row = QHBoxLayout()
         self.path_input = QLineEdit()
         self.path_input.setPlaceholderText("Path to app or script")
-        browse_button = QPushButton("Browse")
-        browse_button.clicked.connect(self._browse)
+        self.browse_button = QPushButton("Browse")
+        self.browse_button.clicked.connect(self._browse)
         path_row.addWidget(self.path_input)
-        path_row.addWidget(browse_button)
+        path_row.addWidget(self.browse_button)
 
         self.desc_input = QTextEdit()
         self.desc_input.setPlaceholderText("Description")
@@ -149,6 +151,9 @@ class AddTileDialog(QDialog):
         layout.addWidget(QLabel("Description"))
         layout.addWidget(self.desc_input)
         layout.addLayout(button_row)
+
+        self.path_input.setReadOnly(path_readonly)
+        self.browse_button.setEnabled(allow_browse)
 
         if defaults:
             self.setWindowTitle("Edit Tile")
@@ -180,6 +185,73 @@ class AddTileDialog(QDialog):
         }
 
 
+class DebianAppDialog(QDialog):
+    def __init__(self, apps, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add System App")
+        self.setModal(True)
+        self.setMinimumWidth(520)
+        self._apps = apps
+        self._filtered_apps = []
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        self.filter_input = QLineEdit()
+        self.filter_input.setPlaceholderText("Search apps")
+        self.filter_input.textChanged.connect(self._refresh_list)
+
+        self.list_widget = QListWidget()
+        self.list_widget.itemDoubleClicked.connect(lambda _: self._accept())
+
+        button_row = QHBoxLayout()
+        button_row.addItem(QSpacerItem(20, 20, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        add_button = QPushButton("Add")
+        add_button.clicked.connect(self._accept)
+        add_button.setDefault(True)
+        button_row.addWidget(cancel_button)
+        button_row.addWidget(add_button)
+
+        layout.addWidget(self.filter_input)
+        layout.addWidget(self.list_widget, 1)
+        layout.addLayout(button_row)
+
+        self._refresh_list("")
+
+    def _refresh_list(self, text):
+        filter_text = text.lower().strip()
+        self.list_widget.clear()
+        self._filtered_apps = []
+        for app in self._apps:
+            name = app.get("name", "")
+            comment = app.get("comment", "")
+            if filter_text and filter_text not in name.lower() and filter_text not in comment.lower():
+                continue
+            item = QListWidgetItem(name)
+            if comment:
+                item.setToolTip(comment)
+            item.setData(Qt.UserRole, app)
+            self.list_widget.addItem(item)
+            self._filtered_apps.append(app)
+
+        if self.list_widget.count():
+            self.list_widget.setCurrentRow(0)
+
+    def _accept(self):
+        if not self.list_widget.currentItem():
+            QMessageBox.warning(self, "Select app", "Pick an application to add.")
+            return
+        self.accept()
+
+    def selected_app(self):
+        item = self.list_widget.currentItem()
+        if not item:
+            return None
+        return item.data(Qt.UserRole)
+
+
 class TileWidget(QFrame):
     def __init__(self, tile, icon_provider, launch_callback, edit_callback, remove_callback, parent=None):
         super().__init__(parent)
@@ -196,7 +268,11 @@ class TileWidget(QFrame):
 
         top_row = QHBoxLayout()
         icon_label = QLabel()
-        icon = icon_provider.icon(QFileInfo(tile["path"])) if tile.get("path") else QIcon()
+        icon = QIcon()
+        if tile.get("icon"):
+            icon = QIcon.fromTheme(tile.get("icon", ""))
+        if icon.isNull() and tile.get("path"):
+            icon = icon_provider.icon(QFileInfo(tile["path"]))
         if icon.isNull():
             icon = self.style().standardIcon(QStyle.SP_DesktopIcon)
         icon_label.setPixmap(icon.pixmap(32, 32))
@@ -254,6 +330,11 @@ class AppBoard(QWidget):
         add_button.setObjectName("primaryButton")
         add_button.clicked.connect(self.add_tile)
         header.addWidget(add_button)
+        if platform.system() == "Linux":
+            add_system_button = QPushButton("Add System App")
+            add_system_button.setObjectName("secondaryButton")
+            add_system_button.clicked.connect(self.add_system_tile)
+            header.addWidget(add_system_button)
         main_layout.addLayout(header)
 
         self.scroll_area = QScrollArea()
@@ -288,6 +369,30 @@ class AppBoard(QWidget):
             self.save_tiles()
             self.refresh_tiles()
 
+    def add_system_tile(self):
+        apps = list_desktop_apps()
+        if not apps:
+            QMessageBox.information(self, "No apps found", "No system applications were found.")
+            return
+        dialog = DebianAppDialog(apps, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        app = dialog.selected_app()
+        if not app:
+            return
+        self.tiles.append(
+            {
+                "kind": "desktop",
+                "name": app["name"],
+                "description": app.get("comment", ""),
+                "exec": app.get("exec", []),
+                "icon": app.get("icon", ""),
+                "desktop_file": app.get("path", ""),
+            }
+        )
+        self.save_tiles()
+        self.refresh_tiles()
+
     def refresh_tiles(self):
         while self.flow_layout.count():
             item = self.flow_layout.takeAt(0)
@@ -312,6 +417,16 @@ class AppBoard(QWidget):
 
     def launch_tile(self, tile):
         path = tile.get("path")
+        if tile.get("kind") == "desktop":
+            command = tile.get("exec", [])
+            if not command:
+                QMessageBox.warning(self, "Missing", "Launch command is missing for this app.")
+                return
+            try:
+                subprocess.Popen(command)
+            except Exception as exc:
+                QMessageBox.critical(self, "Launch failed", str(exc))
+            return
         if not path:
             return
         path = os.path.expanduser(path)
@@ -338,11 +453,28 @@ class AppBoard(QWidget):
         self.refresh_tiles()
 
     def edit_tile(self, tile):
-        dialog = AddTileDialog(self, defaults=tile)
+        if tile.get("kind") == "desktop":
+            defaults = {
+                "name": tile.get("name", ""),
+                "path": tile.get("desktop_file", ""),
+                "description": tile.get("description", ""),
+            }
+            dialog = AddTileDialog(
+                self,
+                defaults=defaults,
+                path_readonly=True,
+                allow_browse=False,
+            )
+        else:
+            dialog = AddTileDialog(self, defaults=tile)
         if dialog.exec() != QDialog.Accepted:
             return
         updated = dialog.values()
-        tile.update(updated)
+        if tile.get("kind") == "desktop":
+            tile["name"] = updated.get("name", tile.get("name", ""))
+            tile["description"] = updated.get("description", tile.get("description", ""))
+        else:
+            tile.update(updated)
         self.save_tiles()
         self.refresh_tiles()
 
@@ -440,6 +572,17 @@ def apply_theme(app):
         }
         QPushButton#primaryButton:hover {
             background: #a04f2a;
+        }
+        QPushButton#secondaryButton {
+            background: #ffffff;
+            color: #1f1f1f;
+            border-radius: 10px;
+            padding: 8px 16px;
+            border: 1px solid #d2c9bc;
+            font-weight: 600;
+        }
+        QPushButton#secondaryButton:hover {
+            background: #f0e8dd;
         }
         """
     )

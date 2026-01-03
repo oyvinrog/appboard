@@ -1,5 +1,7 @@
+import configparser
 import json
 import os
+import shlex
 from pathlib import Path
 
 
@@ -14,6 +16,56 @@ def load_tiles_file(path):
 
 def save_tiles_file(path, tiles):
     path.write_text(json.dumps(tiles, indent=2), encoding="utf-8")
+
+
+def sanitize_exec(exec_line):
+    parts = shlex.split(exec_line)
+    return [part for part in parts if not part.startswith("%")]
+
+
+def parse_desktop_file(path):
+    config = configparser.ConfigParser(interpolation=None)
+    try:
+        config.read(path, encoding="utf-8")
+    except (configparser.Error, UnicodeDecodeError):
+        return None
+
+    if "Desktop Entry" not in config:
+        return None
+
+    entry = config["Desktop Entry"]
+    if entry.get("Type") != "Application":
+        return None
+
+    name = entry.get("Name")
+    exec_line = entry.get("Exec")
+    if not name or not exec_line:
+        return None
+
+    return {
+        "name": name,
+        "exec": sanitize_exec(exec_line),
+        "comment": entry.get("Comment", ""),
+        "icon": entry.get("Icon", ""),
+        "path": str(path),
+    }
+
+
+def list_desktop_apps():
+    paths = [
+        Path("/usr/share/applications"),
+        Path.home() / ".local" / "share" / "applications",
+    ]
+    apps = []
+    for base in paths:
+        if not base.exists():
+            continue
+        for desktop_file in base.glob("*.desktop"):
+            parsed = parse_desktop_file(desktop_file)
+            if parsed:
+                apps.append(parsed)
+    apps.sort(key=lambda item: item["name"].lower())
+    return apps
 
 
 def _venv_python_for_dir(base_dir):

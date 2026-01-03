@@ -4,6 +4,7 @@ A lightweight dashboard for launching your favorite apps and scripts as tiles.
 
 ## Features
 - Add tiles by browsing to an app or script
+- On Linux, add system apps from installed `.desktop` entries
 - Optional descriptions for each tile
 - Handles Python scripts and common shell scripts
 - Uses a nearby virtual environment for Python scripts when available
