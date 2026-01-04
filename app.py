@@ -4,8 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QFileInfo, QPoint, QRect, QSize, Qt
-from PySide6.QtGui import QColor, QIcon, QPalette
+from PySide6.QtCore import QFileInfo, QMimeData, QPoint, QRect, QSize, Qt
+from PySide6.QtGui import QColor, QDrag, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -29,7 +29,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core import determine_launch, list_desktop_apps, load_tiles_file, save_tiles_file
+from core import (
+    determine_launch,
+    list_desktop_apps,
+    load_tiles_file,
+    reorder_tiles,
+    save_tiles_file,
+)
 
 APP_NAME = "AppBoard"
 DATA_FILE = Path(__file__).with_name("shortcuts.json")
@@ -252,15 +258,74 @@ class DebianAppDialog(QDialog):
         return item.data(Qt.UserRole)
 
 
+class TilesContainer(QWidget):
+    def __init__(self, reorder_callback, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self._reorder_callback = reorder_callback
+        self.flow_layout = FlowLayout(self, margin=0, spacing=16)
+        self.setLayout(self.flow_layout)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat("application/x-appboard-tile"):
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat("application/x-appboard-tile"):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        if not event.mimeData().hasFormat("application/x-appboard-tile"):
+            return
+        data = bytes(event.mimeData().data("application/x-appboard-tile")).decode("utf-8")
+        try:
+            source_index = int(data)
+        except ValueError:
+            return
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        target_index = self._target_index(pos)
+        self._reorder_callback(source_index, target_index)
+        event.acceptProposedAction()
+
+    def _target_index(self, pos):
+        widgets = []
+        for i in range(self.flow_layout.count()):
+            item = self.flow_layout.itemAt(i)
+            if item and item.widget():
+                widgets.append(item.widget())
+        if not widgets:
+            return 0
+        best_index = 0
+        best_distance = None
+        for index, widget in enumerate(widgets):
+            center = widget.geometry().center()
+            distance = (pos - center).manhattanLength()
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_index = index
+        return best_index
+
+
 class TileWidget(QFrame):
-    def __init__(self, tile, icon_provider, launch_callback, edit_callback, remove_callback, parent=None):
+    def __init__(
+        self,
+        tile,
+        index,
+        icon_provider,
+        launch_callback,
+        edit_callback,
+        remove_callback,
+        parent=None,
+    ):
         super().__init__(parent)
         self.tile = tile
+        self.index = index
         self.launch_callback = launch_callback
         self.edit_callback = edit_callback
         self.remove_callback = remove_callback
         self.setObjectName("tile")
         self.setFixedSize(260, 160)
+        self._drag_start_pos = None
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
@@ -307,6 +372,27 @@ class TileWidget(QFrame):
         layout.addWidget(desc_label, 1)
         layout.addLayout(button_row)
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start_pos = event.pos()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            event.buttons() & Qt.LeftButton
+            and self._drag_start_pos is not None
+            and (event.pos() - self._drag_start_pos).manhattanLength()
+            >= QApplication.startDragDistance()
+        ):
+            drag = QDrag(self)
+            mime = QMimeData()
+            mime.setData("application/x-appboard-tile", str(self.index).encode("utf-8"))
+            drag.setMimeData(mime)
+            drag.setPixmap(self.grab())
+            drag.exec(Qt.MoveAction)
+            self._drag_start_pos = None
+        super().mouseMoveEvent(event)
+
 
 class AppBoard(QWidget):
     def __init__(self):
@@ -341,9 +427,8 @@ class AppBoard(QWidget):
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.NoFrame)
 
-        self.tiles_widget = QWidget()
-        self.flow_layout = FlowLayout(self.tiles_widget, margin=0, spacing=16)
-        self.tiles_widget.setLayout(self.flow_layout)
+        self.tiles_widget = TilesContainer(self.reorder_tiles)
+        self.flow_layout = self.tiles_widget.flow_layout
 
         self.scroll_area.setWidget(self.tiles_widget)
         main_layout.addWidget(self.scroll_area, 1)
@@ -401,9 +486,10 @@ class AppBoard(QWidget):
                 if widget:
                     widget.deleteLater()
 
-        for tile in self.tiles:
+        for index, tile in enumerate(self.tiles):
             tile_widget = TileWidget(
                 tile,
+                index,
                 self.icon_provider,
                 self.launch_tile,
                 self.edit_tile,
@@ -475,6 +561,14 @@ class AppBoard(QWidget):
             tile["description"] = updated.get("description", tile.get("description", ""))
         else:
             tile.update(updated)
+        self.save_tiles()
+        self.refresh_tiles()
+
+    def reorder_tiles(self, source_index, target_index):
+        updated = reorder_tiles(self.tiles, source_index, target_index)
+        if updated is self.tiles:
+            return
+        self.tiles = updated
         self.save_tiles()
         self.refresh_tiles()
 

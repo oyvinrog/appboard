@@ -68,6 +68,21 @@ def list_desktop_apps():
     return apps
 
 
+def reorder_tiles(tiles, source_index, target_index):
+    if source_index < 0 or target_index < 0:
+        return tiles
+    if source_index >= len(tiles) or target_index >= len(tiles):
+        return tiles
+    if source_index == target_index:
+        return tiles
+    updated = list(tiles)
+    tile = updated.pop(source_index)
+    if source_index < target_index:
+        target_index -= 1
+    updated.insert(target_index, tile)
+    return updated
+
+
 def _venv_python_for_dir(base_dir):
     candidates = [".venv", "venv", ".env", "env"]
     for name in candidates:
